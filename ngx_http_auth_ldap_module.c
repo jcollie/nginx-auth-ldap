@@ -204,6 +204,7 @@ static void * ngx_http_auth_ldap_create_loc_conf(ngx_conf_t *);
 static char * ngx_http_auth_ldap_merge_loc_conf(ngx_conf_t *, void *, void *);
 static ngx_int_t ngx_http_auth_ldap_init_worker(ngx_cycle_t *cycle);
 static ngx_int_t ngx_http_auth_ldap_init(ngx_conf_t *cf);
+static ngx_int_t ngx_http_auth_ldap_pre_config(ngx_conf_t *cf);
 static ngx_int_t ngx_http_auth_ldap_init_cache(ngx_cycle_t *cycle);
 static void ngx_http_auth_ldap_close_connection(ngx_http_auth_ldap_connection_t *c);
 static void ngx_http_auth_ldap_read_handler(ngx_event_t *rev);
@@ -283,7 +284,7 @@ static ngx_command_t ngx_http_auth_ldap_commands[] = {
 };
 
 static ngx_http_module_t ngx_http_auth_ldap_module_ctx = {
-    NULL,                                /* preconfiguration */
+    ngx_http_auth_ldap_pre_config,       /* preconfiguration */
     ngx_http_auth_ldap_init,             /* postconfiguration */
     ngx_http_auth_ldap_create_main_conf, /* create main configuration */
     ngx_http_auth_ldap_init_main_conf,   /* init main configuration */
@@ -841,6 +842,17 @@ ngx_http_auth_ldap_init_worker(ngx_cycle_t *cycle)
     return NGX_OK;
 }
 
+static ngx_uint_t user_dn_var_index;
+
+static ngx_int_t
+ngx_http_auth_ldap_pre_config(ngx_conf_t *cf)
+{
+    ngx_str_t  ngx_http_user_dn_var_name = ngx_string("user_dn");
+    ngx_http_add_variable(cf, &ngx_http_user_dn_var_name, NGX_HTTP_VAR_CHANGEABLE);
+    user_dn_var_index = ngx_http_get_variable_index(cf, &ngx_http_user_dn_var_name);
+    return NGX_OK;
+}
+
 /**
  * Init module and add ldap auth handler to NGX_HTTP_ACCESS_PHASE
  */
@@ -1298,7 +1310,7 @@ ngx_http_auth_ldap_connection_established(ngx_http_auth_ldap_connection_t *c)
         ngx_http_auth_ldap_close_connection(c);
         return;
     }
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: ldap_sasl_bind() -> msgid=%d", c->msgid);
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: ldap_sasl_bind() -> msgid=%d", c->msgid);
 
     c->state = STATE_INITIAL_BINDING;
     ngx_add_timer(c->conn.connection->read, c->server->bind_timeout);
@@ -1823,7 +1835,7 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: The LDAP operation did not finish yet");
         return NGX_AGAIN;
     }
-
+    ngx_http_variable_value_t * var;
     for (;;) {
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Authentication loop (phase=%d, iteration=%d)",
             ctx->phase, ctx->iteration);
@@ -1880,9 +1892,18 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
                 break;
 
             case PHASE_CHECK_USER:
+                /* Set user_dn to config variable */
+                var = ngx_http_get_indexed_variable(r, user_dn_var_index);
+                if (var == NULL){
+                    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: ngx_http_get_indexed_variable() == NULL");
+                } else {
+                    var->len = ctx->user_dn.len;
+                    var->data = (u_char *) ngx_palloc(ctx->r->pool, var->len);
+                    ngx_memcpy(var->data, ctx->user_dn.data, var->len);
+                }
+
                 ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: User DN is \"%V\"",
                     &ctx->user_dn);
-
                 if (ctx->server->require_user != NULL) {
                     rc = ngx_http_auth_ldap_check_user(r, ctx);
                     if (rc != NGX_OK) {
